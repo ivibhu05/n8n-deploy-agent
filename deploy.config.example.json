@@ -1,0 +1,31 @@
+{
+  "defaults": {
+    "branch": "main"
+  },
+  "targets": {
+    "grynow": {
+      "format": "html",
+      "repo": "owner/grynow-site",
+      "branch": "main",
+      "pathPrefix": "blog/",
+      "siteName": "GryNow",
+      "url": "https://grynow.in/blog/"
+    },
+    "mywall": {
+      "format": "html",
+      "repo": "owner/mywall-site",
+      "branch": "main",
+      "pathPrefix": "blog/",
+      "siteName": "MyWall",
+      "url": "https://mywall.me/blog/"
+    },
+    "clientx": {
+      "format": "next-tsx",
+      "repo": "owner/clientx-next",
+      "branch": "main",
+      "pathPrefix": "app/blog/",
+      "siteName": "ClientX",
+      "url": "https://clientx.com/blog/"
+    }
+  }
+}

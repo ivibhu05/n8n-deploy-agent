@@ -51,7 +51,15 @@ if (has("--help") || args.length === 0) {
       "  --message <msg>            Commit message",
       "  --dry-run                  Render to ./out/ only; no push",
       "",
-      "Env: OPENAI_API_KEY, GITHUB_TOKEN",
+      "Style matching (match the target site's CSS/chrome):",
+      "  --style-from <repo/path>   Existing page to mirror (default: auto-detect)",
+      "  --no-style                 Render a generic standalone page instead",
+      "  --no-index                 Skip adding a card to the blog listing page",
+      "",
+      "Auth (per-site token):",
+      "  --token-env <VAR>          Env var holding this site's token (else GITHUB_TOKEN)",
+      "",
+      "Env: OPENAI_API_KEY, GITHUB_TOKEN (or a per-site token via --token-env / tokenEnv)",
     ].join("\n"),
   );
   process.exit(0);
@@ -83,6 +91,10 @@ async function main() {
     url: flag("--url", base.url),
     message: flag("--message"),
     dryRun: has("--dry-run"),
+    tokenEnv: flag("--token-env", base.tokenEnv),
+    styleFrom: flag("--style-from", base.referencePath),
+    noStyle: has("--no-style") || base.noStyle === true,
+    index: has("--no-index") ? undefined : base.index,
   };
 
   console.log(`\n=== Deploy: ${contentFile} ===`);
@@ -94,11 +106,27 @@ async function main() {
 
   const r = await publish(opts);
   console.log(`✓ Rendered ${opts.format} (${r.bytes} chars) → ${r.repoPath}`);
+  console.log(
+    r.referencePath
+      ? `  Style: matched ${r.referencePath}`
+      : `  Style: generic (no reference page used)`,
+  );
   if (r.dryRunFile) {
-    console.log(`[dry-run] Wrote ${r.dryRunFile} — no push.\n`);
+    console.log(`[dry-run] Wrote ${r.dryRunFile} — no push.`);
+    if (r.indexDryRunFile)
+      console.log(
+        `[dry-run] Index card → ${r.indexDryRunFile} (${r.cardLink})`,
+      );
+    console.log("");
   } else {
     console.log(`✓ Committed (${(r.committed.sha || "").slice(0, 7)}).`);
     if (r.committed.url) console.log(`  ${r.committed.url}`);
+    if (r.indexCommitted)
+      console.log(
+        `✓ Listing card added to ${r.indexPath} (${(r.indexCommitted.sha || "").slice(0, 7)}) → ${r.cardLink}`,
+      );
+    else if (r.indexError)
+      console.log(`⚠ Listing card NOT added: ${r.indexError}`);
     console.log("");
   }
 }

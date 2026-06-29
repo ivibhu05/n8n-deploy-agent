@@ -77,7 +77,10 @@ const server = http.createServer(async (req, res) => {
     const result = await publish(opts);
     console.log(
       `[deploy] ${result.format} → ${opts.repo || "(dry-run)"} ${result.repoPath}` +
-        (result.committed ? ` (${(result.committed.sha || "").slice(0, 7)})` : " [dry-run]"),
+        (result.referencePath ? ` (style: ${result.referencePath})` : "") +
+        (result.committed
+          ? ` (${(result.committed.sha || "").slice(0, 7)})`
+          : " [dry-run]"),
     );
     return send(res, 200, { ok: true, ...result });
   } catch (err) {
@@ -92,5 +95,6 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, () => {
   console.log(`deploy-agent webhook listening on :${PORT}`);
   console.log(`  POST /deploy   GET /health`);
-  if (!TOKEN) console.log("  (no DEPLOY_TOKEN set — endpoint is unauthenticated)");
+  if (!TOKEN)
+    console.log("  (no DEPLOY_TOKEN set — endpoint is unauthenticated)");
 });

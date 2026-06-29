@@ -18,25 +18,6 @@
         "linkPrefix": "./",
         "thumbnail": "./assets/blog-banner.webp"
       }
-    },
-    "grynow": {
-      "format": "html",
-      "repo": "owner/grynow-site",
-      "branch": "main",
-      "pathPrefix": "blog/",
-      "siteName": "GryNow",
-      "url": "https://grynow.in/blog/",
-      "tokenEnv": "GRYNOW_GITHUB_TOKEN"
-    },
-    "clientx": {
-      "format": "next-tsx",
-      "repo": "owner/clientx-next",
-      "branch": "main",
-      "pathPrefix": "app/blog/",
-      "siteName": "ClientX",
-      "url": "https://clientx.com/blog/",
-      "tokenEnv": "CLIENTX_GITHUB_TOKEN",
-      "referencePath": "app/blog/example-post/page.tsx"
     }
   }
 }

@@ -12,6 +12,14 @@ const { Octokit } = require("@octokit/rest");
 const MODEL = "gpt-4o-mini";
 const FORMATS = ["html", "next-tsx"];
 
+// Invalid caller input → HTTP 400 (vs. server faults, which stay 500). The
+// server maps err.status < 500 to 400; the CLI just prints the message.
+function badRequest(message) {
+  const err = new Error(message);
+  err.status = 400;
+  return err;
+}
+
 function slugify(s) {
   return String(s)
     .toLowerCase()
@@ -47,18 +55,25 @@ function metaContext(meta) {
     .join("\n");
 }
 
-async function chat(system, markdown, meta) {
+async function chat(system, markdown, meta, reference) {
   const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
   const ctx = metaContext(meta);
+  const parts = [];
+  if (ctx) parts.push(ctx);
+  if (reference) {
+    parts.push(
+      "Reference page from the TARGET site — match its <head> links, CSS classes, " +
+        "header/nav and footer (it may be truncated in the middle):\n\n" +
+        reference,
+    );
+  }
+  parts.push("Markdown article:\n\n" + markdown);
   const res = await client.chat.completions.create({
     model: MODEL,
     temperature: 0.3,
     messages: [
       { role: "system", content: system },
-      {
-        role: "user",
-        content: (ctx ? ctx + "\n\n" : "") + "Markdown article:\n\n" + markdown,
-      },
+      { role: "user", content: parts.join("\n\n---\n\n") },
     ],
   });
   return stripCodeFence(res.choices[0].message.content || "");
@@ -94,12 +109,113 @@ const NEXT_SYSTEM = [
   "- Output ONLY the raw .tsx file contents. No markdown, no fences, no commentary.",
 ].join("\n");
 
-async function renderContent(format, markdown, meta) {
-  return chat(
-    format === "next-tsx" ? NEXT_SYSTEM : HTML_SYSTEM,
-    markdown,
-    meta,
-  );
+// Used when a reference page from the target site is supplied: clone the site's
+// chrome and CSS instead of emitting a generic standalone page.
+const HTML_TEMPLATE_SYSTEM = [
+  "You are a senior web producer. You are given an EXISTING page from the target",
+  "website (as a layout/style reference) and a markdown article. Produce a NEW,",
+  "complete standalone HTML page for the article that visually matches the site:",
+  "- Reproduce the reference's <head>: keep the SAME stylesheet <link>s, font links,",
+  "  favicon and asset paths EXACTLY (same relative paths, e.g. ../css/...). Only",
+  "  change <title>, the meta description, and the Open Graph / Twitter / JSON-LD",
+  "  tags to describe the new article (og:type=article, og:url when a URL is given).",
+  "- Reproduce the site chrome: the SAME header/nav markup and the SAME footer markup",
+  "  as the reference (including any component placeholder divs it uses), so the page",
+  "  inherits the site's existing CSS and navigation.",
+  "- Between header and footer, render the article using the SAME content-wrapper",
+  "  elements and CSS class names the reference uses for its main/article content.",
+  "- Use only assets and classes that appear in the reference. Do NOT add a new inline",
+  "  <style> block unless the reference styles its content inline. Preserve the",
+  "  article content faithfully; do not invent facts.",
+  "- The reference may be truncated in the middle (a comment marks the gap); infer a",
+  "  sensible closing structure.",
+  "- Output ONLY the raw HTML document. No markdown, no code fences, no commentary.",
+].join("\n");
+
+const NEXT_TEMPLATE_SYSTEM = [
+  "You are a senior Next.js engineer. You are given an EXISTING App Router page from",
+  "the target site (as a reference) and a markdown article. Produce a NEW page.tsx",
+  "for the article that matches the reference's conventions:",
+  "- Reuse the SAME imports, wrapper components, layout elements and className",
+  "  conventions the reference uses; do not introduce new component libraries.",
+  "- Export `export const metadata: Metadata = {...}` (title, description <= 160 chars,",
+  "  openGraph { title, description, type: 'article', url when given}), matching the",
+  "  reference's metadata shape. Server Component — no 'use client' unless the",
+  "  reference uses it.",
+  "- Render the full article as JSX using the reference's class/wrapper conventions.",
+  "  Escape JSX correctly. Preserve content faithfully; do not invent facts.",
+  "- Output ONLY the raw .tsx file contents. No markdown, no fences, no commentary.",
+].join("\n");
+
+async function renderContent(format, markdown, meta, reference) {
+  const system =
+    format === "next-tsx"
+      ? reference
+        ? NEXT_TEMPLATE_SYSTEM
+        : NEXT_SYSTEM
+      : reference
+        ? HTML_TEMPLATE_SYSTEM
+        : HTML_SYSTEM;
+  return chat(system, markdown, meta, reference);
+}
+
+const CARD_SYSTEM = [
+  "You are given one or more EXAMPLE blog-listing cards from a website, plus the",
+  "details of a NEW post. Produce exactly ONE new card block for the new post,",
+  "using the SAME HTML structure, tags and CSS class names as the examples.",
+  "- Use these exact values: the post link href = the given LINK (in EVERY place the",
+  "  card links to the post), the card heading text = the given TITLE, the",
+  "  description paragraph = the given DESCRIPTION, the image src/data-src = the given",
+  "  THUMB, and the image alt text = the given TITLE.",
+  "- Keep every other class, attribute and wrapper identical to the examples (same",
+  "  lazyload/data-src convention, same column wrapper). Do not add or drop elements.",
+  "- Output ONLY the raw HTML for the single card block. No markdown, no code fences,",
+  "  no commentary.",
+].join("\n");
+
+// Generate one listing card that mirrors the example card markup.
+async function renderCard({ examples, link, title, description, thumb }) {
+  const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  const user =
+    "Example card(s):\n\n" +
+    examples +
+    "\n\n---\n\nNew post:\n" +
+    `LINK: ${link}\n` +
+    `TITLE: ${title}\n` +
+    `DESCRIPTION: ${description}\n` +
+    `THUMB: ${thumb}`;
+  const res = await client.chat.completions.create({
+    model: MODEL,
+    temperature: 0.2,
+    messages: [
+      { role: "system", content: CARD_SYSTEM },
+      { role: "user", content: user },
+    ],
+  });
+  return stripCodeFence(res.choices[0].message.content || "");
+}
+
+// Pull a short card description from the rendered output (its meta description),
+// falling back to the first real paragraph of the markdown.
+function cardDescription(rendered, format, markdown) {
+  let desc = "";
+  if (format === "next-tsx") {
+    const m = rendered.match(/description:\s*["']([^"']+)["']/);
+    desc = m ? m[1] : "";
+  } else {
+    const m = rendered.match(
+      /<meta\s+name=["']description["']\s+content=["']([^"']+)["']/i,
+    );
+    desc = m ? m[1] : "";
+  }
+  if (!desc) {
+    const para = String(markdown)
+      .split(/\n{2,}/)
+      .map((s) => s.trim())
+      .find((s) => s && !s.startsWith("#") && !s.startsWith("-"));
+    desc = (para || "").replace(/\s+/g, " ").slice(0, 160);
+  }
+  return desc;
 }
 
 function resolveRepoPath({
@@ -127,7 +243,92 @@ function loadTarget(name, configPath) {
   return { ...(cfg.defaults || {}), ...target };
 }
 
+// Per-site token: an explicit opts.token wins, then the env var named by the
+// target's `tokenEnv` (so each site keeps its own token), then global GITHUB_TOKEN.
+function resolveToken(opts) {
+  if (opts.token) return opts.token;
+  if (opts.tokenEnv && process.env[opts.tokenEnv]) {
+    return process.env[opts.tokenEnv];
+  }
+  return process.env.GITHUB_TOKEN || "";
+}
+
+function ghClient(token) {
+  return new Octokit({ auth: token });
+}
+
+// Read a single file from the repo; returns its text, or null if it's missing
+// (404) or a directory.
+async function fetchFile(octokit, owner, repo, branch, filePath) {
+  try {
+    const { data } = await octokit.repos.getContent({
+      owner,
+      repo,
+      path: filePath,
+      ref: branch,
+    });
+    if (Array.isArray(data) || !data.content) return null;
+    return Buffer.from(data.content, "base64").toString("utf-8");
+  } catch (err) {
+    if (err.status === 404) return null;
+    throw err;
+  }
+}
+
+// Choose an existing page to mirror: an explicit styleFrom path, otherwise the
+// first sibling file (same folder as the target) of the right kind. next-tsx
+// pages live in per-slug folders, so auto-detect only applies to html.
+async function pickReferencePath(octokit, owner, repo, branch, opts) {
+  if (opts.styleFrom) return opts.styleFrom;
+  if (opts.format === "next-tsx") return null;
+  const dir = path.posix.dirname(opts.repoPath);
+  try {
+    const { data } = await octokit.repos.getContent({
+      owner,
+      repo,
+      path: dir === "." ? "" : dir,
+      ref: branch,
+    });
+    if (!Array.isArray(data)) return null;
+    const hit = data.find(
+      (f) =>
+        f.type === "file" &&
+        f.path !== opts.repoPath &&
+        f.name.toLowerCase().endsWith(".html"),
+    );
+    return hit ? hit.path : null;
+  } catch (err) {
+    if (err.status === 404) return null;
+    throw err;
+  }
+}
+
+// Real site pages can be huge; keep the head + the head/tail of the body (which
+// hold the chrome we need to mirror) and drop the repetitive middle.
+function trimReference(
+  html,
+  { headMax = 7000, bodyHeadMax = 9000, bodyTailMax = 6000 } = {},
+) {
+  const head = (html.match(/<head[\s\S]*?<\/head>/i) || [""])[0].slice(
+    0,
+    headMax,
+  );
+  const body = (html.match(/<body[\s\S]*?<\/body>/i) || [html])[0];
+  if (body.length <= bodyHeadMax + bodyTailMax) {
+    return head ? head + "\n\n" + body : body;
+  }
+  const top = body.slice(0, bodyHeadMax);
+  const tail = body.slice(-bodyTailMax);
+  return (
+    (head ? head + "\n\n" : "") +
+    top +
+    "\n\n<!-- … middle content omitted; footer/closing structure below … -->\n\n" +
+    tail
+  );
+}
+
 async function commitToGitHub({
+  octokit,
   owner,
   repo,
   branch,
@@ -135,7 +336,6 @@ async function commitToGitHub({
   content,
   message,
 }) {
-  const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
   let sha;
   try {
     const { data } = await octokit.repos.getContent({
@@ -161,23 +361,69 @@ async function commitToGitHub({
 }
 
 /**
+ * Build the listing page with a new card inserted newest-first, so a deployed
+ * post is linked from the blog index. Returns the updated index HTML + the card,
+ * or null if the anchor isn't found. Does not commit.
+ *   index: { path, cardAnchor, linkPrefix?, thumbnail? }
+ *   post:  { repoPath, title, description }
+ */
+async function buildIndexUpdate(indexHtml, index, post) {
+  const anchor = index.cardAnchor;
+  if (!anchor) throw badRequest("index.cardAnchor is required to insert a card");
+  const at = indexHtml.indexOf(anchor);
+  if (at === -1) return null; // anchor not present — skip rather than corrupt
+
+  // A couple of existing cards as the markup model for the LLM.
+  const examples = indexHtml.slice(at, at + 2600);
+  const link = (index.linkPrefix || "./") + post.repoPath;
+  const thumb =
+    index.thumbnail ||
+    `./assets/blog/${post.repoPath.replace(/^.*\//, "").replace(/\.[^.]+$/, "")}/thumbnail.webp`;
+
+  const card = await renderCard({
+    examples,
+    link,
+    title: post.title,
+    description: post.description,
+    thumb,
+  });
+  if (!card || !card.includes(link)) return null; // model didn't produce a usable card
+
+  // Insert before the first existing card, matching its line indentation.
+  const lineStart = indexHtml.lastIndexOf("\n", at) + 1;
+  const indent = indexHtml.slice(lineStart, at);
+  const updated =
+    indexHtml.slice(0, at) +
+    card.trim() +
+    "\n\n" +
+    indent +
+    indexHtml.slice(at);
+  return { updated, card, link };
+}
+
+/**
  * High-level publish used by both CLI and server.
  * opts: { markdown, format?, repo?, branch?, path?, pathPrefix?, slug?, title?,
- *         stem?, siteName?, url?, message?, dryRun? }
- * returns { format, repoPath, bytes, committed?{url,sha}, dryRunFile? }
+ *         stem?, siteName?, url?, message?, dryRun?,
+ *         token?, tokenEnv?, styleFrom?, noStyle? }
+ * Per-site auth: opts.token, else env[opts.tokenEnv], else GITHUB_TOKEN.
+ * Style: unless noStyle, mirrors an existing page (styleFrom, else auto-detected
+ * from the target folder) so output matches the site's CSS/chrome.
+ * returns { format, repoPath, bytes, referencePath?, committed?{url,sha}, dryRunFile? }
  */
 async function publish(opts) {
   const format = (opts.format || "html").toLowerCase();
   if (!FORMATS.includes(format)) {
-    throw new Error(
+    throw badRequest(
       `format must be one of ${FORMATS.join(" | ")}, got: ${format}`,
     );
   }
   const markdown = opts.markdown;
   if (!markdown || !String(markdown).trim())
-    throw new Error("markdown is required");
+    throw badRequest("markdown is required");
   if (!process.env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY missing");
 
+  const branch = opts.branch || "main";
   const title = opts.title || titleFromMarkdown(markdown, opts.slug || "post");
   const repoPath = resolveRepoPath({
     format,
@@ -188,11 +434,43 @@ async function publish(opts) {
     stem: opts.stem,
   });
 
-  const rendered = await renderContent(format, markdown, {
-    siteName: opts.siteName,
-    url: opts.url,
-    title,
-  });
+  // Resolve the target repo + that site's token up front: we need both to read a
+  // style reference and to commit.
+  const token = resolveToken(opts);
+  let owner, repo, octokit;
+  if (opts.repo) {
+    [owner, repo] = String(opts.repo).split("/");
+    if (!owner || !repo)
+      throw badRequest(`repo must be "owner/name", got: ${opts.repo}`);
+    if (token) octokit = ghClient(token);
+  }
+
+  // Read an existing page from the target site to mirror its design.
+  let reference = null;
+  let referencePath = null;
+  if (!opts.noStyle && octokit) {
+    referencePath = await pickReferencePath(octokit, owner, repo, branch, {
+      format,
+      repoPath,
+      styleFrom: opts.styleFrom || opts.referencePath,
+    });
+    if (referencePath) {
+      const raw = await fetchFile(octokit, owner, repo, branch, referencePath);
+      if (raw) {
+        reference =
+          format === "next-tsx" ? raw.slice(0, 20000) : trimReference(raw);
+      } else {
+        referencePath = null; // could not read it; render generically
+      }
+    }
+  }
+
+  const rendered = await renderContent(
+    format,
+    markdown,
+    { siteName: opts.siteName, url: opts.url, title },
+    reference,
+  );
   const valid =
     format === "next-tsx"
       ? /export\s+default/.test(rendered)
@@ -201,28 +479,88 @@ async function publish(opts) {
     throw new Error(`model did not return a valid ${format} document`);
   }
 
+  // Listing-page card: link the new post from the blog index (opt-in via config).
+  const post = {
+    repoPath,
+    title,
+    description: cardDescription(rendered, format, markdown),
+  };
+
   if (opts.dryRun) {
     const outFile = path.resolve(process.cwd(), "out", repoPath);
     fs.mkdirSync(path.dirname(outFile), { recursive: true });
     fs.writeFileSync(outFile, rendered);
-    return { format, repoPath, bytes: rendered.length, dryRunFile: outFile };
+    const result = {
+      format,
+      repoPath,
+      bytes: rendered.length,
+      referencePath,
+      dryRunFile: outFile,
+    };
+    // Preview the index update too, when a repo+token are available to read it.
+    if (opts.index && opts.index.path && octokit) {
+      const raw = await fetchFile(octokit, owner, repo, branch, opts.index.path);
+      const upd = raw && (await buildIndexUpdate(raw, opts.index, post));
+      if (upd) {
+        const idxOut = path.resolve(process.cwd(), "out", opts.index.path);
+        fs.mkdirSync(path.dirname(idxOut), { recursive: true });
+        fs.writeFileSync(idxOut, upd.updated);
+        result.indexPath = opts.index.path;
+        result.indexDryRunFile = idxOut;
+        result.cardLink = upd.link;
+      }
+    }
+    return result;
   }
 
-  if (!opts.repo) throw new Error("repo (owner/name) is required");
-  if (!process.env.GITHUB_TOKEN) throw new Error("GITHUB_TOKEN missing");
-  const [owner, repo] = String(opts.repo).split("/");
-  if (!owner || !repo)
-    throw new Error(`repo must be "owner/name", got: ${opts.repo}`);
+  if (!opts.repo) throw badRequest("repo (owner/name) is required");
+  if (!token)
+    throw new Error(
+      "no GitHub token (set GITHUB_TOKEN, the target's tokenEnv var, or pass token)",
+    );
 
   const committed = await commitToGitHub({
+    octokit,
     owner,
     repo,
-    branch: opts.branch || "main",
+    branch,
     repoPath,
     content: rendered,
     message: opts.message || `Publish: ${title} [deploy-agent]`,
   });
-  return { format, repoPath, bytes: rendered.length, committed };
+
+  // Add the listing card in a second commit. A failure here must not fail the
+  // deploy — the post itself is already live — so surface it as indexError.
+  const result = {
+    format,
+    repoPath,
+    bytes: rendered.length,
+    referencePath,
+    committed,
+  };
+  if (opts.index && opts.index.path) {
+    try {
+      const raw = await fetchFile(octokit, owner, repo, branch, opts.index.path);
+      if (!raw) throw new Error(`index page not found: ${opts.index.path}`);
+      const upd = await buildIndexUpdate(raw, opts.index, post);
+      if (!upd) throw new Error("card anchor not found or card invalid");
+      const idxCommit = await commitToGitHub({
+        octokit,
+        owner,
+        repo,
+        branch,
+        repoPath: opts.index.path,
+        content: upd.updated,
+        message: `Add blog card: ${title} [deploy-agent]`,
+      });
+      result.indexPath = opts.index.path;
+      result.indexCommitted = idxCommit;
+      result.cardLink = upd.link;
+    } catch (err) {
+      result.indexError = err.message;
+    }
+  }
+  return result;
 }
 
 module.exports = {
@@ -230,6 +568,12 @@ module.exports = {
   renderContent,
   commitToGitHub,
   resolveRepoPath,
+  resolveToken,
+  fetchFile,
+  pickReferencePath,
+  trimReference,
+  buildIndexUpdate,
+  cardDescription,
   loadTarget,
   slugify,
   titleFromMarkdown,

@@ -106,6 +106,7 @@ async function main() {
 
   const r = await publish(opts);
   console.log(`✓ Rendered ${opts.format} (${r.bytes} chars) → ${r.repoPath}`);
+  if (r.canonicalUrl) console.log(`  Canonical: ${r.canonicalUrl}`);
   console.log(
     r.referencePath
       ? `  Style: matched ${r.referencePath}`

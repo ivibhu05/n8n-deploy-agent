@@ -45,10 +45,38 @@ function stripCodeFence(text) {
     .trim();
 }
 
+// Per-post canonical URL. opts.url is treated as the SITE base (often the blog
+// section index, e.g. https://site.com/blog/); the served path mirrors the repo
+// path on a static site, so the true per-post URL is repoPath resolved against
+// the base's origin. For next-tsx we map the app-router file to its route
+// (drop a leading app/ or src/app/ segment and the trailing page.tsx). Idempotent:
+// passing an already-correct full post URL returns the same value.
+function canonicalUrl(baseUrl, repoPath, format) {
+  if (!baseUrl || !repoPath) return baseUrl || null;
+  let origin;
+  try {
+    origin = new URL(baseUrl).origin;
+  } catch {
+    return baseUrl; // not a parseable URL — pass through untouched
+  }
+  let servedPath = String(repoPath).replace(/^\/+/, "");
+  if (format === "next-tsx") {
+    servedPath = servedPath
+      .replace(/^src\/app\//, "")
+      .replace(/^app\//, "")
+      .replace(/\/?page\.tsx$/i, "/");
+  }
+  return new URL(servedPath, origin + "/").href;
+}
+
 function metaContext(meta) {
   return [
     meta.siteName ? `Site name: ${meta.siteName}` : null,
-    meta.url ? `Canonical URL / og:url: ${meta.url}` : null,
+    meta.url
+      ? `THIS page's own canonical URL — use it verbatim for <link rel="canonical">, ` +
+        `og:url, twitter:url, and the u=/url= value of EVERY social share link ` +
+        `(Facebook, LinkedIn, Twitter/X, WhatsApp): ${meta.url}`
+      : null,
     meta.title ? `Article title (H1): ${meta.title}` : null,
   ]
     .filter(Boolean)
@@ -87,6 +115,9 @@ const HTML_SYSTEM = [
   "  description (<= 160 chars), Open Graph tags (og:title, og:description,",
   "  og:type=article, og:url when a URL is given), a Twitter summary_large_image",
   "  card, and a JSON-LD <script> with Article schema.",
+  '- When a canonical URL is given, add <link rel="canonical" href="THAT url"> and',
+  "  set og:url / twitter:url to the SAME url. The canonical must be this page's own",
+  "  URL — never a section index or a different page.",
   "- Semantic HTML5 (article, header, h1/h2/h3, p, ul/ol, figure). The H1 is the title.",
   "- A small, clean, responsive inline <style> block. No external CSS/JS, no tracking.",
   "- Preserve all content faithfully; do not invent facts.",
@@ -99,7 +130,9 @@ const NEXT_SYSTEM = [
   '- import type { Metadata } from "next";',
   "- Export `export const metadata: Metadata = {...}` with title, description",
   "  (<= 160 chars) and openGraph { title, description, type: 'article', and url",
-  "  when one is given). This is a Server Component — do NOT add 'use client'.",
+  "  when one is given). When a canonical URL is given, also set",
+  "  `alternates: { canonical: '<that url>' }` (this page's own URL, not an index).",
+  "  This is a Server Component — do NOT add 'use client'.",
   "- `export default function Page() { return (<article>...</article>); }` rendering",
   "  the full article as semantic JSX (h1 for the title, then h2/h3, p, ul/ol/li).",
   "- Plain JSX with semantic elements only. Do NOT assume Tailwind or any CSS",
@@ -119,6 +152,16 @@ const HTML_TEMPLATE_SYSTEM = [
   "  favicon and asset paths EXACTLY (same relative paths, e.g. ../css/...). Only",
   "  change <title>, the meta description, and the Open Graph / Twitter / JSON-LD",
   "  tags to describe the new article (og:type=article, og:url when a URL is given).",
+  '- CRITICAL for SEO — the reference\'s <link rel="canonical"> points to the',
+  "  REFERENCE's own URL. You MUST replace it with THIS article's canonical URL",
+  "  (given above). Never leave it as the reference's URL and never point it at a",
+  "  section/blog index. Set og:url and twitter:url to the same canonical URL.",
+  "- CRITICAL — the reference's social share links (Facebook sharer u=, LinkedIn",
+  "  shareArticle url=, Twitter/X intent url=, WhatsApp, etc.) contain the",
+  "  REFERENCE's URL. Rewrite the u=/url= value in EVERY share link to THIS",
+  "  article's canonical URL, URL-encoded, and set any share title/text param to",
+  "  this article's title. Do not leave any share link pointing at the reference",
+  "  or at a section index.",
   "- Reproduce the site chrome: the SAME header/nav markup and the SAME footer markup",
   "  as the reference (including any component placeholder divs it uses), so the page",
   "  inherits the site's existing CSS and navigation.",
@@ -140,8 +183,10 @@ const NEXT_TEMPLATE_SYSTEM = [
   "  conventions the reference uses; do not introduce new component libraries.",
   "- Export `export const metadata: Metadata = {...}` (title, description <= 160 chars,",
   "  openGraph { title, description, type: 'article', url when given}), matching the",
-  "  reference's metadata shape. Server Component — no 'use client' unless the",
-  "  reference uses it.",
+  "  reference's metadata shape. When a canonical URL is given, set",
+  "  `alternates: { canonical: '<that url>' }` to THIS page's own URL — replace any",
+  "  canonical the reference carried; never reuse the reference's or a section index.",
+  "  Server Component — no 'use client' unless the reference uses it.",
   "- Render the full article as JSX using the reference's class/wrapper conventions.",
   "  Escape JSX correctly. Preserve content faithfully; do not invent facts.",
   "- Output ONLY the raw .tsx file contents. No markdown, no fences, no commentary.",
@@ -369,7 +414,8 @@ async function commitToGitHub({
  */
 async function buildIndexUpdate(indexHtml, index, post) {
   const anchor = index.cardAnchor;
-  if (!anchor) throw badRequest("index.cardAnchor is required to insert a card");
+  if (!anchor)
+    throw badRequest("index.cardAnchor is required to insert a card");
   const at = indexHtml.indexOf(anchor);
   if (at === -1) return null; // anchor not present — skip rather than corrupt
 
@@ -465,10 +511,14 @@ async function publish(opts) {
     }
   }
 
+  // opts.url is the site/section base; derive THIS post's own canonical URL so
+  // the canonical, og:url and share links point at the post (not the index).
+  const url = canonicalUrl(opts.url, repoPath, format);
+
   const rendered = await renderContent(
     format,
     markdown,
-    { siteName: opts.siteName, url: opts.url, title },
+    { siteName: opts.siteName, url, title },
     reference,
   );
   const valid =
@@ -493,13 +543,20 @@ async function publish(opts) {
     const result = {
       format,
       repoPath,
+      canonicalUrl: url,
       bytes: rendered.length,
       referencePath,
       dryRunFile: outFile,
     };
     // Preview the index update too, when a repo+token are available to read it.
     if (opts.index && opts.index.path && octokit) {
-      const raw = await fetchFile(octokit, owner, repo, branch, opts.index.path);
+      const raw = await fetchFile(
+        octokit,
+        owner,
+        repo,
+        branch,
+        opts.index.path,
+      );
       const upd = raw && (await buildIndexUpdate(raw, opts.index, post));
       if (upd) {
         const idxOut = path.resolve(process.cwd(), "out", opts.index.path);
@@ -534,13 +591,20 @@ async function publish(opts) {
   const result = {
     format,
     repoPath,
+    canonicalUrl: url,
     bytes: rendered.length,
     referencePath,
     committed,
   };
   if (opts.index && opts.index.path) {
     try {
-      const raw = await fetchFile(octokit, owner, repo, branch, opts.index.path);
+      const raw = await fetchFile(
+        octokit,
+        owner,
+        repo,
+        branch,
+        opts.index.path,
+      );
       if (!raw) throw new Error(`index page not found: ${opts.index.path}`);
       const upd = await buildIndexUpdate(raw, opts.index, post);
       if (!upd) throw new Error("card anchor not found or card invalid");
@@ -568,6 +632,7 @@ module.exports = {
   renderContent,
   commitToGitHub,
   resolveRepoPath,
+  canonicalUrl,
   resolveToken,
   fetchFile,
   pickReferencePath,

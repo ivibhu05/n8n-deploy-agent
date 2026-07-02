@@ -37,6 +37,28 @@ function titleFromMarkdown(md, fallback) {
   return m ? m[1].trim() : fallback;
 }
 
+function postedOnTimeZone() {
+  return process.env.POSTED_ON_TIMEZONE || process.env.TZ || "Asia/Kolkata";
+}
+
+function formatPostedOnDate(date = new Date()) {
+  return new Intl.DateTimeFormat("en", {
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+    timeZone: postedOnTimeZone(),
+  }).format(date);
+}
+
+function formatPostedOnIso(date = new Date()) {
+  return new Intl.DateTimeFormat("en-CA", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    timeZone: postedOnTimeZone(),
+  }).format(date);
+}
+
 function stripCodeFence(text) {
   // Remove a wrapping ```lang ... ``` fence if the model adds one.
   return String(text)
@@ -78,6 +100,32 @@ function metaContext(meta) {
         `(Facebook, LinkedIn, Twitter/X, WhatsApp): ${meta.url}`
       : null,
     meta.title ? `Article title (H1): ${meta.title}` : null,
+    // SEO Agent authored these — use them EXACTLY, do not rewrite or improvise.
+    meta.metaTitle
+      ? `SEO meta title (use verbatim for <title> and og:title/twitter:title): ${meta.metaTitle}`
+      : null,
+    meta.metaDescription
+      ? `SEO meta description (use verbatim for the meta description, og:description, ` +
+        `twitter:description): ${meta.metaDescription}`
+      : null,
+    meta.thumbnail
+      ? `Social/thumbnail image URL — use it for og:image, twitter:image, and any ` +
+        `hero/thumbnail <img> the layout expects: ${meta.thumbnail}`
+      : null,
+    Array.isArray(meta.schemaTypes) && meta.schemaTypes.length
+      ? `Emit JSON-LD covering these schema.org types (one <script type="application/ld+json"> ` +
+        `each, or a @graph): ${meta.schemaTypes.join(", ")}. Populate FAQPage from the ` +
+        `article's FAQ section when present.`
+      : null,
+    meta.postedOn
+      ? `Posted on date for THIS deploy/post: ${meta.postedOn}. If the page has ` +
+        `any visible "Posted on", "Published on", date badge, <time> element, ` +
+        `Article schema datePublished/dateModified, or article metadata date, use this date ` +
+        `for the new article. Do not copy a date from the reference page.`
+      : null,
+    meta.postedOnIso
+      ? `Machine-readable publish date for THIS deploy/post: ${meta.postedOnIso}`
+      : null,
   ]
     .filter(Boolean)
     .join("\n");
@@ -120,6 +168,9 @@ const HTML_SYSTEM = [
   "  URL — never a section index or a different page.",
   "- Semantic HTML5 (article, header, h1/h2/h3, p, ul/ol, figure). The H1 is the title.",
   "- A small, clean, responsive inline <style> block. No external CSS/JS, no tracking.",
+  "- When a Posted on date is given, show it near the article heading as `Posted on DATE`,",
+  '  use a matching <time datetime="YYYY-MM-DD">DATE</time> when possible, and',
+  "  use the same deploy/post date for JSON-LD datePublished/dateModified.",
   "- Preserve all content faithfully; do not invent facts.",
   "- Output ONLY the raw HTML document. No markdown, no code fences, no commentary.",
 ].join("\n");
@@ -135,6 +186,9 @@ const NEXT_SYSTEM = [
   "  This is a Server Component — do NOT add 'use client'.",
   "- `export default function Page() { return (<article>...</article>); }` rendering",
   "  the full article as semantic JSX (h1 for the title, then h2/h3, p, ul/ol/li).",
+  "- When a Posted on date is given, render it near the article heading as",
+  '  `Posted on DATE`, preferably with <time dateTime="YYYY-MM-DD">DATE</time>,',
+  "  and use the same deploy/post date in article metadata when applicable.",
   "- Plain JSX with semantic elements only. Do NOT assume Tailwind or any CSS",
   "  framework and do NOT import CSS. No external components or libraries.",
   "- Escape JSX correctly (apostrophes, braces, < and >). Preserve all content",
@@ -162,6 +216,10 @@ const HTML_TEMPLATE_SYSTEM = [
   "  article's canonical URL, URL-encoded, and set any share title/text param to",
   "  this article's title. Do not leave any share link pointing at the reference",
   "  or at a section index.",
+  "- CRITICAL — if the reference has any visible Posted on / Published on date,",
+  "  date badge, <time> element, Article schema datePublished/dateModified, or",
+  "  article metadata date, replace it with THIS deploy/post date supplied above.",
+  "  Never copy the reference article's old date.",
   "- Reproduce the site chrome: the SAME header/nav markup and the SAME footer markup",
   "  as the reference (including any component placeholder divs it uses), so the page",
   "  inherits the site's existing CSS and navigation.",
@@ -187,6 +245,9 @@ const NEXT_TEMPLATE_SYSTEM = [
   "  `alternates: { canonical: '<that url>' }` to THIS page's own URL — replace any",
   "  canonical the reference carried; never reuse the reference's or a section index.",
   "  Server Component — no 'use client' unless the reference uses it.",
+  "- If the reference has any visible Posted on / Published on date, date badge,",
+  "  <time> element, or article metadata date, replace it with THIS deploy/post date",
+  "  supplied above. Never copy the reference article's old date.",
   "- Render the full article as JSX using the reference's class/wrapper conventions.",
   "  Escape JSX correctly. Preserve content faithfully; do not invent facts.",
   "- Output ONLY the raw .tsx file contents. No markdown, no fences, no commentary.",
@@ -214,12 +275,23 @@ const CARD_SYSTEM = [
   "  THUMB, and the image alt text = the given TITLE.",
   "- Keep every other class, attribute and wrapper identical to the examples (same",
   "  lazyload/data-src convention, same column wrapper). Do not add or drop elements.",
+  "- If the examples contain any visible Posted on / Published on date, date badge,",
+  "  <time> element, or datetime attribute, use the given POSTED_ON / POSTED_ON_ISO",
+  "  values for the new card. Never copy the example card's old date.",
   "- Output ONLY the raw HTML for the single card block. No markdown, no code fences,",
   "  no commentary.",
 ].join("\n");
 
 // Generate one listing card that mirrors the example card markup.
-async function renderCard({ examples, link, title, description, thumb }) {
+async function renderCard({
+  examples,
+  link,
+  title,
+  description,
+  thumb,
+  postedOn,
+  postedOnIso,
+}) {
   const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
   const user =
     "Example card(s):\n\n" +
@@ -228,7 +300,9 @@ async function renderCard({ examples, link, title, description, thumb }) {
     `LINK: ${link}\n` +
     `TITLE: ${title}\n` +
     `DESCRIPTION: ${description}\n` +
-    `THUMB: ${thumb}`;
+    `THUMB: ${thumb}\n` +
+    `POSTED_ON: ${postedOn || ""}\n` +
+    `POSTED_ON_ISO: ${postedOnIso || ""}`;
   const res = await client.chat.completions.create({
     model: MODEL,
     temperature: 0.2,
@@ -422,7 +496,10 @@ async function buildIndexUpdate(indexHtml, index, post) {
   // A couple of existing cards as the markup model for the LLM.
   const examples = indexHtml.slice(at, at + 2600);
   const link = (index.linkPrefix || "./") + post.repoPath;
+  // Prefer the post's own thumbnail (from the Thumbnail Agent), then a per-target
+  // default, then the conventional per-slug path.
   const thumb =
+    post.thumbnail ||
     index.thumbnail ||
     `./assets/blog/${post.repoPath.replace(/^.*\//, "").replace(/\.[^.]+$/, "")}/thumbnail.webp`;
 
@@ -432,6 +509,8 @@ async function buildIndexUpdate(indexHtml, index, post) {
     title: post.title,
     description: post.description,
     thumb,
+    postedOn: post.postedOn,
+    postedOnIso: post.postedOnIso,
   });
   if (!card || !card.includes(link)) return null; // model didn't produce a usable card
 
@@ -450,7 +529,7 @@ async function buildIndexUpdate(indexHtml, index, post) {
 /**
  * High-level publish used by both CLI and server.
  * opts: { markdown, format?, repo?, branch?, path?, pathPrefix?, slug?, title?,
- *         stem?, siteName?, url?, message?, dryRun?,
+ *         stem?, siteName?, url?, message?, dryRun?, postedOn?, postedOnIso?,
  *         token?, tokenEnv?, styleFrom?, noStyle? }
  * Per-site auth: opts.token, else env[opts.tokenEnv], else GITHUB_TOKEN.
  * Style: unless noStyle, mirrors an existing page (styleFrom, else auto-detected
@@ -479,6 +558,11 @@ async function publish(opts) {
     title,
     stem: opts.stem,
   });
+  const postedOnDate = new Date();
+  const postedOn =
+    opts.postedOn || opts.publishDate || formatPostedOnDate(postedOnDate);
+  const postedOnIso =
+    opts.postedOnIso || opts.publishDateIso || formatPostedOnIso(postedOnDate);
 
   // Resolve the target repo + that site's token up front: we need both to read a
   // style reference and to commit.
@@ -513,12 +597,23 @@ async function publish(opts) {
 
   // opts.url is the site/section base; derive THIS post's own canonical URL so
   // the canonical, og:url and share links point at the post (not the index).
-  const url = canonicalUrl(opts.url, repoPath, format);
+  // An explicit opts.canonical (e.g. from the SEO Agent's brief) wins.
+  const url = opts.canonical || canonicalUrl(opts.url, repoPath, format);
 
   const rendered = await renderContent(
     format,
     markdown,
-    { siteName: opts.siteName, url, title },
+    {
+      siteName: opts.siteName,
+      url,
+      title,
+      postedOn,
+      postedOnIso,
+      metaTitle: opts.metaTitle,
+      metaDescription: opts.metaDescription,
+      thumbnail: opts.thumbnail,
+      schemaTypes: opts.schemaTypes,
+    },
     reference,
   );
   const valid =
@@ -534,6 +629,9 @@ async function publish(opts) {
     repoPath,
     title,
     description: cardDescription(rendered, format, markdown),
+    postedOn,
+    postedOnIso,
+    thumbnail: opts.thumbnail,
   };
 
   if (opts.dryRun) {
@@ -544,6 +642,8 @@ async function publish(opts) {
       format,
       repoPath,
       canonicalUrl: url,
+      postedOn,
+      postedOnIso,
       bytes: rendered.length,
       referencePath,
       dryRunFile: outFile,
@@ -592,6 +692,8 @@ async function publish(opts) {
     format,
     repoPath,
     canonicalUrl: url,
+    postedOn,
+    postedOnIso,
     bytes: rendered.length,
     referencePath,
     committed,
@@ -642,6 +744,9 @@ module.exports = {
   loadTarget,
   slugify,
   titleFromMarkdown,
+  postedOnTimeZone,
+  formatPostedOnDate,
+  formatPostedOnIso,
   FORMATS,
   MODEL,
 };

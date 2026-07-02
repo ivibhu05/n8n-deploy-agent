@@ -4,7 +4,10 @@
  * an approved article over HTTP.
  *
  *   POST /deploy   { markdown, target?|repo, format?, branch?, path?|pathPrefix?|slug?,
- *                    siteName?, url?, message?, dryRun? }
+ *                    siteName?, url?, message?, dryRun?,
+ *                    // SEO Agent passthrough (all optional): use the brief's exact
+ *                    // metadata/schema/thumbnail instead of letting the renderer improvise
+ *                    metaTitle?, metaDescription?, canonical?, schemaTypes?[], thumbnail? }
  *   GET  /health   → { ok: true }
  *
  * Auth: if DEPLOY_TOKEN is set, requests must send header `x-deploy-token: <token>`.

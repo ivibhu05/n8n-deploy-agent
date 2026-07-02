@@ -49,6 +49,20 @@ node deploy.js --content examples/sample-article.md --dry-run
 | `--message <msg>` | Commit message |
 | `--dry-run` | Render to `./out/` only |
 
+### SEO Agent passthrough (webhook / programmatic)
+
+When an upstream SEO agent has already decided the page's metadata, pass it so the
+renderer uses those exact values instead of improvising. All optional, all honored by
+both `html` and `next-tsx` formats:
+
+| Field | Effect |
+|---|---|
+| `metaTitle` | verbatim `<title>` / `og:title` / `twitter:title` |
+| `metaDescription` | verbatim meta description / `og:description` / `twitter:description` |
+| `canonical` | exact canonical URL (overrides the URL derived from `url` + path) |
+| `schemaTypes` (array) | which JSON-LD schema.org types to emit (e.g. `["Article","FAQPage"]`) |
+| `thumbnail` | image URL for `og:image` / `twitter:image` and the blog-index card |
+
 ## Output formats (per target)
 
 Different sites consume content differently, so each target declares a `format`
